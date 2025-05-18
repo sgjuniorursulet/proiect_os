@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,13 +6,22 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #define COMMAND_FILE "command.txt"
 
 volatile sig_atomic_t received_signal = 0;
+static int output_pipe = -1;
 
 void handle_signal(int sig) {
     received_signal = sig;
+}
+
+void write_to_pipe(const char *message) {
+    if (output_pipe != -1) {
+        write(output_pipe, message, strlen(message));
+    }
 }
 
 void process_command() {
@@ -26,17 +36,33 @@ void process_command() {
     if (n <= 0) return;
     buffer[n] = '\0';
 
+    char output[1024] = {0};
+
     if (strncmp(buffer, "list_hunts", 10) == 0) {
-        printf("[Monitor] Listing hunts...\n");
-        system("ls -d */ | cut -f1 -d'/'");
+        strcat(output, "[Monitor] Listing hunts...\n");
+        FILE *fp = popen("ls -d */ | cut -f1 -d'/'", "r");
+        if (fp) {
+            char line[256];
+            while (fgets(line, sizeof(line), fp)) {
+                strcat(output, line);
+            }
+            pclose(fp);
+        }
     } else if (strncmp(buffer, "list_treasures", 14) == 0) {
         char *hunt_id = strchr(buffer, ' ');
         if (hunt_id) {
             hunt_id++;
-            printf("[Monitor] Listing treasures in hunt: %s\n", hunt_id);
+            snprintf(output, sizeof(output), "[Monitor] Listing treasures in hunt: %s\n", hunt_id);
             char cmd[300];
             snprintf(cmd, sizeof(cmd), "./manager --list %s", hunt_id);
-            system(cmd);
+            FILE *fp = popen(cmd, "r");
+            if (fp) {
+                char line[256];
+                while (fgets(line, sizeof(line), fp)) {
+                    strncat(output, line, sizeof(output) - strlen(output) - 1);
+                }
+                pclose(fp);
+            }
         }
     } else if (strncmp(buffer, "view_treasure", 13) == 0) {
         char *args = strchr(buffer, ' ');
@@ -46,22 +72,36 @@ void process_command() {
             if (tid) {
                 *tid = '\0';
                 tid++;
-                printf("[Monitor] Viewing treasure %s in hunt %s\n", tid, args);
+                snprintf(output, sizeof(output), "[Monitor] Viewing treasure %s in hunt %s\n", tid, args);
                 char cmd[300];
                 snprintf(cmd, sizeof(cmd), "./manager --view %s %s", args, tid);
-                system(cmd);
+                FILE *fp = popen(cmd, "r");
+                if (fp) {
+                    char line[256];
+                    while (fgets(line, sizeof(line), fp)) {
+                        strncat(output, line, sizeof(output) - strlen(output) - 1);
+                    }
+                    pclose(fp);
+                }
             }
         }
     } else if (strncmp(buffer, "stop", 4) == 0) {
-        printf("[Monitor] Stopping...\n");
-        usleep(2000000); // Delay to simulate cleanup
+        strcat(output, "[Monitor] Stopping...\n");
+        usleep(2000000); 
+        write_to_pipe(output);
         exit(0);
     } else {
-        printf("[Monitor] Unknown command: %s\n", buffer);
+        snprintf(output, sizeof(output), "[Monitor] Unknown command: %s\n", buffer);
     }
+
+    write_to_pipe(output);
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+    if (argc > 1) {
+        output_pipe = atoi(argv[1]);
+    }
+
     struct sigaction sa;
     sa.sa_handler = handle_signal;
     sigemptyset(&sa.sa_mask);
@@ -72,7 +112,8 @@ int main() {
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
 
-    printf("[Monitor] Ready. PID: %d\n", getpid());
+    write_to_pipe("[Monitor] Ready.\n");
+
     while (1) {
         pause();
         if (received_signal) {
@@ -80,5 +121,6 @@ int main() {
             received_signal = 0;
         }
     }
+
     return 0;
 }
